@@ -1,0 +1,15 @@
+# Generated dashboards (rebuilt by run_daily.py / CI)
+ema_dashboard.html
+oversold_dashboard.html
+index.html
+public/
+
+# Caches and backtest artifacts
+earnings_cache.json
+backtest_trades.csv
+__pycache__/
+*.pyc
+.DS_Store
+
+# Local tooling / editor config
+.claude/

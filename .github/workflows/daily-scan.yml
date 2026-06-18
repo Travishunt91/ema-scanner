@@ -1,0 +1,53 @@
+name: Daily Market Scan
+
+on:
+  schedule:
+    # GitHub cron is UTC and does NOT follow US daylight saving.
+    # 22:00 UTC = 6pm EDT (summer) / 5pm EST (winter) — both safely after the
+    # 4pm ET close. Mon–Fri only.
+    - cron: "0 22 * * 1-5"
+  workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
+
+# Allow the workflow to publish to GitHub Pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: daily-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run daily scan
+        run: python run_daily.py
+
+      - name: Collect dashboards for Pages
+        run: |
+          mkdir -p public
+          cp index.html ema_dashboard.html oversold_dashboard.html public/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

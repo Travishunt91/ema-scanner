@@ -1,0 +1,179 @@
+//@version=6
+// =============================================================================
+// EMA Stack + Oversold Monitor  —  live TradingView port of the Python scanners
+// -----------------------------------------------------------------------------
+// Replicates two setups in one indicator:
+//   1) TREND  : weekly + daily EMA(9/21/33/50/200) stack, EMA9-break, 0-10 score,
+//               entry zone, scale-out target  -> STRONG BUY / WATCH / NO SIGNAL
+//   2) MEAN-REVERSION : RSI(2) oversold while above the 200-day -> dip-buy
+//
+// Apply on the DAILY timeframe (it warns if you don't). Weekly EMA200 needs ~4y
+// of history loaded on the chart to be valid.
+// =============================================================================
+indicator("EMA Stack + Oversold Monitor", overlay = true, max_labels_count = 200)
+
+// ---- Inputs ----------------------------------------------------------------
+grpT  = "Trend (EMA stack)"
+showEMAs   = input.bool(true,  "Plot daily EMAs",              group = grpT)
+pullbackPc = input.float(3.0,  "WATCH proximity to EMA9/21 %", group = grpT)
+scalePc    = input.float(5.0,  "Scale-out target %",           group = grpT)
+
+grpR  = "Mean-reversion (RSI-2)"
+rsiOSLvl   = input.int(10,     "Oversold RSI(2) <",            group = grpR)
+rsiDeepLvl = input.int(5,      "Deep oversold RSI(2) <",       group = grpR)
+trendLen   = input.int(200,    "Uptrend filter SMA",           group = grpR)
+exitLen    = input.int(5,      "Bounce-exit SMA",              group = grpR)
+
+grpV  = "Display"
+showTable   = input.bool(true,   "Show dashboard",             group = grpV)
+compactMode = input.bool(true,   "Compact (key rows only)",    group = grpV)
+posSel      = input.string("Bottom Right", "Dashboard position",
+     options = ["Top Right", "Middle Right", "Bottom Right", "Top Left", "Bottom Left"], group = grpV)
+sizeSel     = input.string("Small", "Dashboard text size",
+     options = ["Tiny", "Small", "Normal"], group = grpV)
+bgTransp    = input.int(25, "Dashboard transparency", minval = 0, maxval = 90, group = grpV)
+showMarks   = input.bool(true,   "Show signal markers",        group = grpV)
+showStrongBg= input.bool(false,  "Tint background on STRONG BUY", group = grpV)
+
+// ---- Daily EMAs (chart series; apply on daily TF) --------------------------
+e9   = ta.ema(close, 9)
+e21  = ta.ema(close, 21)
+e33  = ta.ema(close, 33)
+e50  = ta.ema(close, 50)
+e200 = ta.ema(close, 200)
+
+// ---- Weekly EMAs (pulled regardless of chart TF) ---------------------------
+w9   = request.security(syminfo.tickerid, "W", ta.ema(close, 9),   lookahead = barmerge.lookahead_off)
+w21  = request.security(syminfo.tickerid, "W", ta.ema(close, 21),  lookahead = barmerge.lookahead_off)
+w33  = request.security(syminfo.tickerid, "W", ta.ema(close, 33),  lookahead = barmerge.lookahead_off)
+w50  = request.security(syminfo.tickerid, "W", ta.ema(close, 50),  lookahead = barmerge.lookahead_off)
+w200 = request.security(syminfo.tickerid, "W", ta.ema(close, 200), lookahead = barmerge.lookahead_off)
+wClose = request.security(syminfo.tickerid, "W", close, lookahead = barmerge.lookahead_off)
+
+// ---- Stack helpers ---------------------------------------------------------
+stackLabel(a, b, c, d, e) =>
+    bull = a > b and b > c and c > d and d > e
+    bear = a < b and b < c and c < d and d < e
+    bull ? "FULL BULL" : bear ? "FULL BEAR" : "MIXED"
+
+orderedPairs(a, b, c, d, e) =>
+    (a > b ? 1 : 0) + (b > c ? 1 : 0) + (c > d ? 1 : 0) + (d > e ? 1 : 0)
+
+dailyLabel  = stackLabel(e9, e21, e33, e50, e200)
+weeklyLabel = stackLabel(w9, w21, w33, w50, w200)
+weeklyBull  = weeklyLabel == "FULL BULL"
+dailyBull   = dailyLabel  == "FULL BULL"
+
+// ---- Distances / EMA9 break ------------------------------------------------
+pct9   = (close - e9)  / e9  * 100.0
+pct21  = (close - e21) / e21 * 100.0
+buyNow = close > e9
+break9 = ta.crossover(close, e9)            // fresh cross up through EMA9
+barsSinceBreak = ta.barssince(break9)        // in daily bars (na until first)
+
+// ---- Combined trend signal (matches the scanner) ---------------------------
+near    = math.abs(pct9) <= pullbackPc or math.abs(pct21) <= pullbackPc
+signal  = weeklyBull and buyNow ? "STRONG BUY" : weeklyBull and near ? "WATCH" : "NO SIGNAL"
+
+// ---- 0-10 score (same rubric as the dashboard) -----------------------------
+wkPairs  = orderedPairs(w9, w21, w33, w50, w200)
+dyPairs  = orderedPairs(e9, e21, e33, e50, e200)
+sWeekly  = wkPairs / 4.0 * 3.0
+sDaily   = dyPairs / 4.0 * 2.0
+sAbove   = buyNow ? 1.0 : 0.0
+sEntry   = buyNow ? (pct9 <= 3 ? 2.0 : pct9 <= 6 ? 1.0 : pct9 <= 10 ? 0.5 : 0.0) : 0.0
+sFresh   = not na(barsSinceBreak) and barsSinceBreak <= 1 ? 1.0 : (not na(barsSinceBreak) and barsSinceBreak <= 5 ? 0.5 : 0.0)
+sWeekUp  = wClose > w9 ? 0.75 : 0.0          // (approx of the dashboard's weekly>EMA9 leg)
+score    = math.min(sWeekly + sDaily + sAbove + sEntry + sFresh + sWeekUp, 10.0)
+
+// ---- Entry zone + scale-out ------------------------------------------------
+ezLow   = math.min(e9, e21)
+ezHigh  = math.max(e9, e21)
+ezStat  = close > ezHigh ? "PULLBACK" : close >= ezLow ? "IN ZONE" : "BELOW"
+scBasis = ezStat == "IN ZONE" ? close : ezStat == "PULLBACK" ? e9 : float(na)
+scTarget = na(scBasis) ? na : scBasis * (1 + scalePc / 100.0)
+
+// ---- Mean-reversion (RSI-2 oversold dip) -----------------------------------
+rsi2    = ta.rsi(close, 2)
+sma_tr  = ta.sma(close, trendLen)
+sma_ex  = ta.sma(close, exitLen)
+upTrend = close > sma_tr
+osLabel = upTrend and rsi2 < rsiDeepLvl ? "DEEP OVERSOLD" : upTrend and rsi2 < rsiOSLvl ? "OVERSOLD" : "—"
+osBuy   = upTrend and rsi2 < rsiOSLvl and not (rsi2[1] < rsiOSLvl)   // fresh dip trigger
+osExit  = close > sma_ex                                            // bounce to the mean
+
+// ---- Plots -----------------------------------------------------------------
+plot(showEMAs ? e9   : na, "EMA 9",   color.new(color.aqua,   0), 1)
+plot(showEMAs ? e21  : na, "EMA 21",  color.new(color.lime,   0), 1)
+plot(showEMAs ? e33  : na, "EMA 33",  color.new(color.yellow, 30), 1)
+plot(showEMAs ? e50  : na, "EMA 50",  color.new(color.orange, 0), 1)
+plot(showEMAs ? e200 : na, "EMA 200", color.new(color.red,    0), 2)
+
+// subtle background when the strongest trend setup is on (off by default)
+bgcolor(showStrongBg and signal == "STRONG BUY" ? color.new(color.green, 90) : na, title = "Strong Buy bg")
+
+// markers
+plotshape(showMarks and break9 and weeklyBull, "EMA9 break (wk bull)", shape.triangleup,
+          location.belowbar, color.new(color.aqua, 0), size = size.small, text = "9↑")
+plotshape(showMarks and signal == "STRONG BUY" and not (signal[1] == "STRONG BUY"), "Strong Buy",
+          shape.labelup, location.belowbar, color.new(color.green, 0), size = size.small, text = "BUY")
+plotshape(showMarks and osBuy, "Oversold dip", shape.diamond,
+          location.belowbar, color.new(color.fuchsia, 0), size = size.tiny, text = "dip")
+
+// ---- Alerts ----------------------------------------------------------------
+alertcondition(signal == "STRONG BUY" and not (signal[1] == "STRONG BUY"),
+     "Trend: STRONG BUY", "{{ticker}} STRONG BUY — weekly full bull + price above daily EMA9")
+alertcondition(break9 and weeklyBull,
+     "Trend: fresh EMA9 break (weekly bull)", "{{ticker}} broke up through daily EMA9 in a weekly bull stack")
+alertcondition(osBuy,
+     "Mean-reversion: oversold dip", "{{ticker}} oversold (RSI2) above the 200-day — dip-buy candidate")
+alertcondition(osBuy and weeklyBull,
+     "Confluence: oversold dip in weekly bull", "{{ticker}} oversold dip AND weekly full bull — high-confluence long")
+
+// ---- Dashboard table -------------------------------------------------------
+f_sig_col(s) => s == "STRONG BUY" ? color.green : s == "WATCH" ? color.orange : color.gray
+f_stk_col(s) => s == "FULL BULL" ? color.green : s == "FULL BEAR" ? color.red : color.gray
+f_os_col(s)  => s == "DEEP OVERSOLD" ? color.fuchsia : s == "OVERSOLD" ? color.purple : color.gray
+
+tablePos = posSel == "Top Right" ? position.top_right : posSel == "Middle Right" ? position.middle_right : posSel == "Bottom Right" ? position.bottom_right : posSel == "Top Left" ? position.top_left : position.bottom_left
+tSize    = sizeSel == "Tiny" ? size.tiny : sizeSel == "Normal" ? size.normal : size.small
+
+var table t = table.new(tablePos, 2, 9, border_width = 1,
+     border_color = color.new(color.gray, 75),
+     frame_width = 1, frame_color = color.new(color.gray, 40))
+
+cellBg  = color.new(#161b22, bgTransp)   // matches the HTML dashboard panel
+keyCol  = color.new(color.gray, 10)
+cell(int r, string k, string v, color vc) =>
+    table.cell(t, 0, r, k, text_color = keyCol, text_size = tSize,
+               text_halign = text.align_left,  bgcolor = cellBg)
+    table.cell(t, 1, r, v, text_color = vc,    text_size = tSize,
+               text_halign = text.align_right, bgcolor = cellBg)
+
+// full-detail rows are blank in compact mode (empty rows collapse to nothing)
+detail(int r, string k, string v, color vc) =>
+    if not compactMode
+        cell(r, k, v, vc)
+
+pct9Str = (pct9 >= 0 ? "+" : "") + str.tostring(pct9, "#.##") + "%"
+sigBg   = signal == "STRONG BUY" ? color.green : signal == "WATCH" ? color.orange : color.new(color.gray, 20)
+sigTxt  = signal == "NO SIGNAL" ? color.white : color.black
+
+if showTable and barstate.islast
+    // Row 0 — one bold, color-coded banner: the at-a-glance verdict.
+    banner = timeframe.isdaily ? syminfo.ticker + "  ·  " + signal : "⚠ Apply on Daily timeframe"
+    table.cell(t, 0, 0, banner, text_color = sigTxt, text_size = tSize,
+               text_halign = text.align_center, bgcolor = color.new(sigBg, math.max(bgTransp - 15, 0)))
+    table.cell(t, 1, 0, "", bgcolor = color.new(sigBg, math.max(bgTransp - 15, 0)))
+    table.merge_cells(t, 0, 0, 1, 0)
+    // Always-on key rows
+    cell(1, "Score",     str.tostring(score, "#.#") + " / 10", score >= 8 ? color.green : score >= 5 ? color.orange : color.gray)
+    cell(2, "Trend W/D", weeklyLabel + " / " + dailyLabel, f_stk_col(weeklyLabel))
+    cell(3, "Entry",     ezStat + "  " + str.tostring(ezLow, format.mintick) + "–" + str.tostring(ezHigh, format.mintick),
+         ezStat == "IN ZONE" ? color.green : ezStat == "PULLBACK" ? color.orange : color.gray)
+    cell(4, "Mean-rev",  osLabel == "—" ? "RSI2 " + str.tostring(rsi2, "#") : osLabel, f_os_col(osLabel))
+    // Detail rows (full mode only)
+    detail(5, "% vs EMA9",  pct9Str, buyNow ? color.green : color.red)
+    detail(6, "EMA9 break", na(barsSinceBreak) ? "—" : (barsSinceBreak == 0 ? "TODAY" : str.tostring(barsSinceBreak) + "d ago"), color.aqua)
+    detail(7, "Scale-out",  na(scTarget) ? "—" : str.tostring(scTarget, format.mintick) + " (+" + str.tostring(scalePc, "#") + "%)", color.teal)
+    detail(8, "Hint",       ezStat == "PULLBACK" ? "wait for dip" : ezStat == "IN ZONE" ? "buyable now" : "below support", color.gray)
