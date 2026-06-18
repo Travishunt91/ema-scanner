@@ -63,7 +63,9 @@ jobs:
       - name: Collect dashboards for Pages
         run: |
           mkdir -p public
-          cp index.html ema_dashboard.html oversold_dashboard.html public/
+          cp index.html ema_dashboard.html oversold_dashboard.html momentum_dashboard.html public/
+          # publish the portfolio state so the next run can diff against it
+          cp momentum_state.json public/ 2>/dev/null || true
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

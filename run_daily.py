@@ -14,6 +14,7 @@ from __future__ import annotations
 from datetime import datetime
 
 import ema_scanner
+import momentum_scanner
 import oversold_scanner
 
 
@@ -24,7 +25,7 @@ def write_index(generated: datetime) -> None:
 <title>Daily Market Scan</title>
 <style>
   :root {{ --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#e6edf3;
-          --muted:#8b949e; --bull:#2ea043; --blue:#388bfd; }}
+          --muted:#8b949e; --bull:#2ea043; --blue:#388bfd; --purple:#a371f7; }}
   * {{ box-sizing:border-box; }}
   body {{ margin:0; background:var(--bg); color:var(--text); min-height:100vh;
          font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }}
@@ -38,6 +39,7 @@ def write_index(generated: datetime) -> None:
   a.card:hover {{ transform:translateY(-2px); }}
   a.card.trend:hover {{ border-color:var(--bull); }}
   a.card.rev:hover {{ border-color:var(--blue); }}
+  a.card.mom:hover {{ border-color:var(--purple); }}
   .emoji {{ font-size:32px; }}
   .ct {{ font-size:19px; font-weight:700; margin:10px 0 6px; }}
   .cd {{ color:var(--muted); font-size:13px; line-height:1.6; }}
@@ -45,6 +47,7 @@ def write_index(generated: datetime) -> None:
          padding:4px 10px; border-radius:6px; }}
   .trend .tag {{ background:rgba(46,160,67,.18); color:var(--bull); }}
   .rev .tag {{ background:rgba(56,139,253,.18); color:var(--blue); }}
+  .mom .tag {{ background:rgba(163,113,247,.18); color:var(--purple); }}
   footer {{ color:var(--muted); font-size:12px; padding:8px 32px 40px; }}
 </style></head><body>
 <header>
@@ -67,6 +70,14 @@ def write_index(generated: datetime) -> None:
       uptrend — buy the dip, exit on the bounce to the 5-day mean, −3% stop,
       with earnings warnings. Hold ~1–2 days.</div>
     <span class="tag">MEAN-REVERSION · OPEN DASHBOARD →</span>
+  </a>
+  <a class="card mom" href="momentum_dashboard.html">
+    <div class="emoji">🚀</div>
+    <div class="ct">Momentum Rotation</div>
+    <div class="cd">Concentrated top-5 by 6-month momentum, sized by signal strength,
+      with a SPY 200-day regime switch to cash in downtrends. A sample portfolio
+      to rebalance ~monthly.</div>
+    <span class="tag">MOMENTUM · OPEN DASHBOARD →</span>
   </a>
 </div>
 <footer>Two opposite edges: ride trends vs. fade dips. Not investment advice.</footer>
@@ -94,6 +105,10 @@ def main() -> int:
     print("\n[B] Mean-reversion — oversold big-name scanner")
     print("-" * 60)
     oversold_scanner.main(tickers=tickers, daily=daily)
+
+    print("\n[C] Momentum — rotation portfolio")
+    print("-" * 60)
+    momentum_scanner.main(tickers=tickers, daily=daily)
 
     write_index(datetime.now().astimezone())
     print("\n" + "=" * 60)

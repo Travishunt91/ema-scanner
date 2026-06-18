@@ -1,12 +1,17 @@
 # Generated dashboards (rebuilt by run_daily.py / CI)
 ema_dashboard.html
 oversold_dashboard.html
+momentum_dashboard.html
 index.html
 public/
 
 # Caches and backtest artifacts
 earnings_cache.json
+momentum_state.json
 backtest_trades.csv
+portfolio_trades.csv
+portfolio_sim.html
+momentum_sim.html
 __pycache__/
 *.pyc
 .DS_Store
