@@ -2,13 +2,12 @@ name: Daily Market Scan
 
 on:
   schedule:
-    # GitHub cron is UTC and does NOT follow US daylight saving.
-    # 22:00 UTC = 6pm EDT (summer) / 5pm EST (winter) — both safely after the
-    # 4pm ET close. Mon–Fri only.
-    - cron: "0 22 * * 1-5"
-  workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
+    # GitHub cron is UTC and does NOT follow daylight saving, so we list both
+    # offsets and let the "gate" job below run only the correct one each season.
+    - cron: "30 21 * * 1-5"   # 21:30 UTC = 4:30pm Central during DST   (CDT, ~Mar–Nov)
+    - cron: "30 22 * * 1-5"   # 22:30 UTC = 4:30pm Central in standard  (CST, ~Nov–Mar)
+  workflow_dispatch: {}        # manual "Run workflow" button (always runs)
 
-# Allow the workflow to publish to GitHub Pages.
 permissions:
   contents: read
   pages: write
@@ -19,7 +18,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Decide whether THIS trigger is the real 4:30pm-Central run for the season.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.check.outputs.go }}
+    steps:
+      - id: check
+        name: Run only at 4:30pm Central (DST-aware)
+        run: |
+          go=false
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            go=true                                   # manual runs always proceed
+          else
+            tz=$(TZ=America/Chicago date +%Z)         # CDT or CST
+            sched="${{ github.event.schedule }}"
+            [ "$sched" = "30 21 * * 1-5" ] && [ "$tz" = "CDT" ] && go=true
+            [ "$sched" = "30 22 * * 1-5" ] && [ "$tz" = "CST" ] && go=true
+          fi
+          echo "Central time now: $(TZ=America/Chicago date)  ->  go=$go"
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+
   scan:
+    needs: gate
+    if: needs.gate.outputs.go == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
