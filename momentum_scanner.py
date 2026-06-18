@@ -27,6 +27,7 @@ MOM_SKIP = 21           # skip the most recent ~month
 TOP_N = 5               # concentrated portfolio size
 MAX_WEIGHT = 0.40       # cap any single position
 TREND_LEN = 200         # uptrend filter (SMA, matches the backtest)
+REBAL = 21              # rebalance cadence in trading days (~monthly, matches sim)
 SAMPLE_CAPITAL = 100_000.0
 BENCH_N = 10            # how many "next in line" names to show
 OUTPUT_HTML = "momentum_dashboard.html"
@@ -45,18 +46,44 @@ def momentum_pct(close: pd.Series):
     return (recent / base - 1) * 100.0 if base > 0 else None
 
 
-def spy_regime() -> dict:
+def spy_close() -> pd.Series | None:
+    """SPY daily closes — used for both the regime and as the trading calendar."""
     try:
         d = download(["SPY"], "1y", "1d")["SPY"]
         if isinstance(d.columns, pd.MultiIndex):
             d = d.droplevel(0, axis=1)
-        c = d["Close"].dropna()
-        if len(c) < TREND_LEN:
-            return {}
-        price = float(c.iloc[-1]); sma = float(c.rolling(TREND_LEN).mean().iloc[-1])
-        return dict(risk_on=price > sma, pct=(price / sma - 1) * 100)
+        return d["Close"].dropna()
     except Exception:
+        return None
+
+
+def regime_from(c: pd.Series | None) -> dict:
+    if c is None or len(c) < TREND_LEN:
         return {}
+    price = float(c.iloc[-1]); sma = float(c.rolling(TREND_LEN).mean().iloc[-1])
+    return dict(risk_on=price > sma, pct=(price / sma - 1) * 100)
+
+
+def trading_days_since(ref_dates, last_rebalance_iso) -> int | None:
+    """How many trading bars have closed since the last rebalance date."""
+    if not last_rebalance_iso:
+        return None
+    try:
+        ts = pd.Timestamp(last_rebalance_iso).normalize()
+        return int((ref_dates.normalize() > ts).sum())
+    except Exception:
+        return None
+
+
+def current_info(ticker, daily):
+    """Latest price + momentum for a held name (it may have weakened since entry)."""
+    df = daily.get(ticker)
+    if df is None or df.empty:
+        return None
+    c = df["Close"].dropna()
+    if len(c) < TREND_LEN:
+        return None
+    return float(c.iloc[-1]), momentum_pct(c)
 
 
 def rank_candidates(tickers, daily):
@@ -113,11 +140,12 @@ def load_prev_state() -> dict | None:
         return None
 
 
-def save_state(picks, regime) -> None:
+def save_state(holdings: dict, regime, last_rebalance: str) -> None:
     json.dump({
         "date": date.today().isoformat(),
+        "last_rebalance": last_rebalance,
         "risk_on": bool(regime.get("risk_on", True)) if regime else True,
-        "holdings": {p["ticker"]: round(p["weight"], 1) for p in picks},
+        "holdings": holdings,
     }, open(STATE_FILE, "w"))
 
 
@@ -180,34 +208,58 @@ def _change_badge(p) -> str:
     return '<span class="chg hold">hold</span>'
 
 
-def render(picks, bench, regime, generated, moves=None) -> str:
-    reg = regime or {}
-    if reg:
-        cls = "on" if reg["risk_on"] else "off"
-        chip = f'<span class="chip {cls}">SPY {reg["pct"]:+.1f}% vs 200-day · risk-{"on" if reg["risk_on"] else "off"}</span>'
-    else:
-        chip = ""
+def _hold_action(due_in, drift) -> str:
+    drift = drift or {}
+    dchips = "".join(f'<span class="mv drift">would BUY {t}</span>' for t in drift.get("would_buy", [])) \
+        + "".join(f'<span class="mv drift">would SELL {t}</span>' for t in drift.get("would_sell", []))
+    dchips = dchips or '<span class="mv hold">portfolio unchanged at next rebalance</span>'
+    return (f'<div class="moves"><span class="moves-h">Action:</span> '
+            f'<span class="mv hold">HOLD — next rebalance in {due_in} trading days</span></div>'
+            f'<div class="moves"><span class="moves-h">Drift watch (not actionable until rebalance):</span> {dchips}</div>')
 
-    moves_html = _moves_box(moves)
-    if reg and not reg["risk_on"]:
+
+def render(ctx, generated) -> str:
+    mode = ctx["mode"]
+    reg = ctx.get("regime") or {}
+    picks = ctx.get("picks") or []
+    bench = ctx.get("bench") or []
+    due_in = ctx.get("due_in")
+    held_days = ctx.get("held_days")
+
+    chip = (f'<span class="chip {"on" if reg["risk_on"] else "off"}">SPY {reg["pct"]:+.1f}% '
+            f'vs 200-day · risk-{"on" if reg["risk_on"] else "off"}</span>') if reg else ""
+    if mode == "rebalance":
+        cadence = '<span class="chip reb">🔄 Rebalanced today</span>'
+    elif mode == "hold":
+        cadence = f'<span class="chip held">Holding · day {held_days}/{REBAL} · rebalance in {due_in}d</span>'
+    else:
+        cadence = ""
+
+    if mode == "hold":
+        action = _hold_action(due_in, ctx.get("drift"))
+    else:
+        action = _moves_box(ctx.get("moves"))
+
+    if mode == "cash":
         body = f"""
-    {moves_html}
+    {action}
     <div class="cash">💵 <b>CASH — broad market is below its 200-day.</b>
       Momentum rotation sits out downtrends, so no positions are suggested today.
       Re-engage when SPY reclaims its 200-day average.</div>"""
     elif not picks:
-        body = '<div class="cash">No qualifying names (need positive momentum in an uptrend).</div>'
+        body = f'{action}<div class="cash">No qualifying names (need positive momentum in an uptrend).</div>'
     else:
+        show_chg = mode == "rebalance"
         prows = "".join(f"""
         <tr>
           <td class="rank">{i+1}</td>
           <td class="tk">{p['ticker']}<span class="co">{html.escape(p['name'])}</span></td>
-          <td>{_change_badge(p)}</td>
+          <td>{_change_badge(p) if show_chg else '<span class="chg hold">hold</span>'}</td>
           <td class="num w">{p['weight']:.0f}%</td>
           <td class="num">${p['dollars']:,.0f}</td>
           <td class="num">${p['price']:,.2f}</td>
           <td class="num">{p['shares']:,}</td>
-          <td class="num mom">+{p['momentum']:.0f}%</td>
+          <td class="num mom">{p['momentum']:+.0f}%</td>
         </tr>""" for i, p in enumerate(picks))
         brows = "".join(f"""
         <tr>
@@ -216,14 +268,15 @@ def render(picks, bench, regime, generated, moves=None) -> str:
           <td class="num">${b['price']:,.2f}</td>
           <td class="num mom">+{b['momentum']:.0f}%</td>
         </tr>""" for i, b in enumerate(bench))
+        held_label = " (locked — current prices)" if mode == "hold" else ""
         body = f"""
-    {moves_html}
+    {action}
     <table class="tbl">
       <thead><tr><th>#</th><th>Ticker</th><th>Change</th><th class="num">Weight</th><th class="num">Allocate</th>
         <th class="num">Price</th><th class="num">~Shares</th><th class="num">6m Mom</th></tr></thead>
       <tbody>{prows}</tbody>
     </table>
-    <div class="bench-h">Next in line (rebalance candidates)</div>
+    <div class="bench-h">Next in line (rebalance candidates){held_label}</div>
     <table class="tbl bench">
       <thead><tr><th>#</th><th>Ticker</th><th class="num">Price</th><th class="num">6m Mom</th></tr></thead>
       <tbody>{brows}</tbody>
@@ -240,6 +293,9 @@ def render(picks, bench, regime, generated, moves=None) -> str:
   .chip {{ font-size:11px; font-weight:700; padding:3px 9px; border-radius:6px; margin-left:10px; }}
   .chip.on {{ background:rgba(46,160,67,.18); color:var(--bull); }}
   .chip.off {{ background:rgba(248,81,73,.18); color:var(--bear); }}
+  .chip.reb {{ background:rgba(163,113,247,.20); color:#a371f7; }}
+  .chip.held {{ background:rgba(110,118,129,.20); color:var(--muted); }}
+  .mv.drift {{ background:rgba(110,118,129,.12); color:var(--muted); font-weight:600; }}
   .wrap {{ padding:22px 32px 40px; max-width:880px; }}
   .tbl {{ width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--border); border-radius:10px; overflow:hidden; }}
   .tbl th, .tbl td {{ padding:9px 12px; font-size:13px; border-bottom:1px solid var(--border); text-align:left; }}
@@ -271,7 +327,7 @@ def render(picks, bench, regime, generated, moves=None) -> str:
   .chg.hold, .chg.none {{ background:rgba(110,118,129,.16); color:var(--muted); }}
 </style></head><body>
 <header>
-  <h1>🚀 Momentum Rotation — Top {TOP_N}{chip}</h1>
+  <h1>🚀 Momentum Rotation{chip}{cadence}</h1>
   <div class="sub">S&amp;P 500 + Nasdaq 100 · weighted by 6-month momentum · ${SAMPLE_CAPITAL:,.0f} sample · Generated {generated:%Y-%m-%d %H:%M}</div>
 </header>
 <div class="wrap">{body}
@@ -294,27 +350,78 @@ def main(tickers=None, daily=None) -> int:
         print(f"  {len(tickers)} tickers (reusing shared daily download).")
 
     cands = rank_candidates(tickers, daily)
-    picks = weighted_top(cands)
+    fresh = weighted_top(cands)                 # what the top-5 would be today
     bench = cands[TOP_N:TOP_N + BENCH_N]
-    regime = spy_regime()
+
+    sc = spy_close()
+    regime = regime_from(sc)
+    ref_dates = sc.index if sc is not None else None
+    today = (ref_dates[-1].date().isoformat() if ref_dates is not None
+             else date.today().isoformat())
 
     prev = load_prev_state()
-    moves = compute_moves(picks, regime, prev)   # annotates picks with 'change'
+    prev_holdings = (prev or {}).get("holdings", {})
+    last_rebal = (prev or {}).get("last_rebalance")
+    tdays = trading_days_since(ref_dates, last_rebal)
+    was_cash = bool(prev and not prev.get("risk_on", True))
+    risk_on = bool(regime.get("risk_on", True)) if regime else True
+
+    # Decide the action cadence (matches the backtest's ~21-day rebalance).
+    rebalance_due = (prev is None or last_rebal is None or was_cash
+                     or (tdays is not None and tdays >= REBAL))
+
+    ctx = dict(regime=regime, bench=bench, today=today, rebal_n=REBAL)
+
+    if not risk_on:
+        # Risk-off: go to cash (a forced rebalance). Sells = whatever was held.
+        mode = "cash"
+        moves = dict(buys=[], sells=sorted(prev_holdings), adds=[], trims=[],
+                     now_cash=True, was_cash=was_cash)
+        save_state({}, regime, today)
+        picks = []
+        ctx.update(mode=mode, picks=picks, moves=moves, held_days=None, due_in=None)
+
+    elif rebalance_due:
+        # Rebalance day: adopt the fresh top-5 and surface the moves.
+        mode = "rebalance"
+        moves = compute_moves(fresh, regime, prev)   # annotates fresh with 'change'
+        new_holdings = {p["ticker"]: round(p["weight"], 1) for p in fresh}
+        save_state(new_holdings, regime, today)
+        picks = fresh
+        ctx.update(mode=mode, picks=picks, moves=moves, held_days=0, due_in=REBAL)
+
+    else:
+        # Holding between rebalances: keep the locked portfolio, show a countdown.
+        mode = "hold"
+        held = []
+        for t, w in sorted(prev_holdings.items(), key=lambda kv: -kv[1]):
+            info = current_info(t, daily)
+            price, mom = (info if info else (float("nan"), None))
+            held.append(dict(ticker=t, name=TICKER_NAMES.get(t, ""), weight=w,
+                             price=price, momentum=mom if mom is not None else 0.0,
+                             dollars=SAMPLE_CAPITAL * w / 100,
+                             shares=int(SAMPLE_CAPITAL * w / 100 / price) if price and price == price else 0))
+        # Non-actionable drift preview: what a rebalance today would change.
+        fresh_set = {p["ticker"] for p in fresh}
+        drift = dict(would_buy=[t for t in fresh_set if t not in prev_holdings],
+                     would_sell=[t for t in prev_holdings if t not in fresh_set])
+        save_state(prev_holdings, regime, last_rebal)   # keep lock + counter
+        picks = held
+        ctx.update(mode=mode, picks=picks, moves=None, drift=drift,
+                   held_days=tdays, due_in=(REBAL - tdays if tdays is not None else None))
 
     with open(OUTPUT_HTML, "w") as f:
-        f.write(render(picks, bench, regime, datetime.now().astimezone(), moves))
-    save_state(picks, regime)
+        f.write(render(ctx, datetime.now().astimezone()))
 
-    state = "CASH (risk-off)" if regime and not regime["risk_on"] else f"{len(picks)} names"
-    print(f"\n✅ {OUTPUT_HTML} written · regime: {state}")
+    print(f"\n✅ {OUTPUT_HTML} written · mode: {mode.upper()}"
+          + (f" · next rebalance in {ctx['due_in']} trading days" if mode == "hold" else ""))
     for p in picks:
-        chg = p.get("change", ("", None))[0]
-        print(f"   {p['ticker']:6} {p['weight']:>4.0f}%  mom +{p['momentum']:.0f}%  {chg}")
-    if moves:
-        if moves["buys"]:
-            print(f"   BUY:  {', '.join(moves['buys'])}")
-        if moves["sells"]:
-            print(f"   SELL: {', '.join(moves['sells'])}")
+        print(f"   {p['ticker']:6} {p['weight']:>4.0f}%  mom +{p['momentum']:.0f}%")
+    if mode == "rebalance" and ctx["moves"]:
+        if ctx["moves"]["buys"]:
+            print(f"   BUY:  {', '.join(ctx['moves']['buys'])}")
+        if ctx["moves"]["sells"]:
+            print(f"   SELL: {', '.join(ctx['moves']['sells'])}")
     return 0
 
 
