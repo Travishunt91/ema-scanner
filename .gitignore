@@ -2,6 +2,7 @@
 ema_dashboard.html
 oversold_dashboard.html
 momentum_dashboard.html
+next_nvidia_dashboard.html
 index.html
 public/
 
@@ -10,6 +11,7 @@ earnings_cache.json
 momentum_state.json
 backtest_trades.csv
 portfolio_trades.csv
+next_nvidia_screen.csv
 portfolio_sim.html
 momentum_sim.html
 __pycache__/

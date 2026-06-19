@@ -15,6 +15,7 @@ from datetime import datetime
 
 import ema_scanner
 import momentum_scanner
+import next_nvidia
 import oversold_scanner
 
 
@@ -25,7 +26,7 @@ def write_index(generated: datetime) -> None:
 <title>Daily Market Scan</title>
 <style>
   :root {{ --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#e6edf3;
-          --muted:#8b949e; --bull:#2ea043; --blue:#388bfd; --purple:#a371f7; }}
+          --muted:#8b949e; --bull:#2ea043; --blue:#388bfd; --purple:#a371f7; --teal:#39c5cf; }}
   * {{ box-sizing:border-box; }}
   body {{ margin:0; background:var(--bg); color:var(--text); min-height:100vh;
          font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }}
@@ -48,6 +49,8 @@ def write_index(generated: datetime) -> None:
   .trend .tag {{ background:rgba(46,160,67,.18); color:var(--bull); }}
   .rev .tag {{ background:rgba(56,139,253,.18); color:var(--blue); }}
   .mom .tag {{ background:rgba(163,113,247,.18); color:var(--purple); }}
+  a.card.fund:hover {{ border-color:var(--teal); }}
+  .fund .tag {{ background:rgba(57,197,207,.16); color:var(--teal); }}
   footer {{ color:var(--muted); font-size:12px; padding:8px 32px 40px; }}
 </style></head><body>
 <header>
@@ -79,8 +82,17 @@ def write_index(generated: datetime) -> None:
       to rebalance ~monthly.</div>
     <span class="tag">MOMENTUM · OPEN DASHBOARD →</span>
   </a>
+  <a class="card fund" href="next_nvidia_dashboard.html">
+    <div class="emoji">🔎</div>
+    <div class="ct">Next-NVIDIA Screen</div>
+    <div class="cd">Fundamentals, not price. Ranks the universe against NVDA's pre-explosion
+      fingerprint — high gross margin (the moat), heavy R&amp;D, accelerating revenue and a
+      wide gross-to-net gap (dormant operating leverage). Tiered, with a QoQ staircase to
+      separate a real inflection from one lumpy year. A research watchlist, not a buy list.</div>
+    <span class="tag">FUNDAMENTAL · OPEN DASHBOARD →</span>
+  </a>
 </div>
-<footer>Two opposite edges: ride trends vs. fade dips. Not investment advice.</footer>
+<footer>Three price edges (trend / dip / momentum) + one fundamental lens. Not investment advice.</footer>
 </body></html>"""
     with open("index.html", "w") as f:
         f.write(html)
@@ -109,6 +121,13 @@ def main() -> int:
     print("\n[C] Momentum — rotation portfolio")
     print("-" * 60)
     momentum_scanner.main(tickers=tickers, daily=daily)
+
+    # Fundamentals can't share the price download (yfinance has no batch
+    # financials endpoint) and barely move day to day, so the heavy per-ticker
+    # scan runs WEEKLY (Mondays); other days republish last Monday's dashboard.
+    print("\n[D] Fundamentals — next-NVIDIA screen (weekly)")
+    print("-" * 60)
+    next_nvidia.main(tickers=tickers, weekly=True)
 
     write_index(datetime.now().astimezone())
     print("\n" + "=" * 60)
