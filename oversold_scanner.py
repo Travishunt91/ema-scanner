@@ -25,9 +25,11 @@ from scalp_backtest import rsi
 EXIT_SMA = 5       # exit when close climbs back above this SMA (the "mean")
 TREND_SMA = 200    # only buy dips above this (uptrend filter)
 STOP_PCT = 3.0     # hard stop below entry
-RSI_DEEP = 5.0     # deeply oversold
-RSI_OVERSOLD = 10.0
-RSI_WATCH = 20.0
+# Per-name oversold tiers on RSI(14) — same metric as the bounce gauge, and a
+# better per-trade edge than RSI(2) in testing (+0.31% vs +0.15% net/trade).
+RSI_DEEP = 20.0    # deeply oversold
+RSI_OVERSOLD = 30.0
+RSI_WATCH = 40.0
 EARNINGS_WINDOW = 90   # look this far ahead for the next earnings date
 EARNINGS_RISK = 10     # flag/⚠ if earnings fall within this many days
 OUTPUT_HTML = "oversold_dashboard.html"
@@ -44,7 +46,7 @@ SIGNAL_RANK = {"DEEP OVERSOLD": 0, "OVERSOLD": 1, "WATCH": 2, "DOWNTREND": 3, "N
 class Row:
     ticker: str
     price: float
-    rsi2: float
+    rsi14: float
     above_trend: bool
     pct_vs_trend: float
     bounce_target: float      # SMA5 price (exit level)
@@ -63,22 +65,22 @@ def analyze(ticker: str, df: pd.DataFrame) -> Row | None:
     price = float(close.iloc[-1])
     sma_trend = float(close.rolling(TREND_SMA).mean().iloc[-1])
     sma_exit = float(close.rolling(EXIT_SMA).mean().iloc[-1])
-    r2 = float(rsi(close, 2).iloc[-1])
+    r14 = float(rsi(close, 14).iloc[-1])
     above = price > sma_trend
 
     if not above:
         signal = "DOWNTREND"
-    elif r2 < RSI_DEEP:
+    elif r14 < RSI_DEEP:
         signal = "DEEP OVERSOLD"
-    elif r2 < RSI_OVERSOLD:
+    elif r14 < RSI_OVERSOLD:
         signal = "OVERSOLD"
-    elif r2 < RSI_WATCH:
+    elif r14 < RSI_WATCH:
         signal = "WATCH"
     else:
         signal = "NO SIGNAL"
 
     return Row(
-        ticker=ticker, price=price, rsi2=r2, above_trend=above,
+        ticker=ticker, price=price, rsi14=r14, above_trend=above,
         pct_vs_trend=(price / sma_trend - 1) * 100,
         bounce_target=sma_exit, pct_to_bounce=(sma_exit / price - 1) * 100,
         stop=price * (1 - STOP_PCT / 100), signal=signal,
@@ -177,7 +179,7 @@ def render_gauge(g: dict) -> str:
 
 
 def render(rows: list[Row], generated: datetime, gauge: dict | None = None) -> str:
-    rows = sorted(rows, key=lambda r: (SIGNAL_RANK[r.signal], r.rsi2))
+    rows = sorted(rows, key=lambda r: (SIGNAL_RANK[r.signal], r.rsi14))
     actionable = sum(r.signal in ("DEEP OVERSOLD", "OVERSOLD") for r in rows)
 
     def badge(text, kind):
@@ -189,14 +191,14 @@ def render(rows: list[Row], generated: datetime, gauge: dict | None = None) -> s
     trs = []
     for r in rows:
         name = html.escape(TICKER_NAMES.get(r.ticker, ""))
-        rsi_kind = "deep" if r.rsi2 < RSI_DEEP else "os" if r.rsi2 < RSI_OVERSOLD else "watch" if r.rsi2 < RSI_WATCH else "mixed"
+        rsi_kind = "deep" if r.rsi14 < RSI_DEEP else "os" if r.rsi14 < RSI_OVERSOLD else "watch" if r.rsi14 < RSI_WATCH else "mixed"
         trend = badge(f"{r.pct_vs_trend:+.1f}%", "bull" if r.above_trend else "bear")
         trs.append(f"""
       <tr data-rank="{SIGNAL_RANK[r.signal]}">
         <td class="ticker">{r.ticker}<span class="coname">{name}</span></td>
         <td>{badge(r.signal, sig_kind[r.signal])}</td>
         <td class="num">${r.price:,.2f}</td>
-        <td class="num">{badge(f"{r.rsi2:.0f}", rsi_kind)}</td>
+        <td class="num">{badge(f"{r.rsi14:.0f}", rsi_kind)}</td>
         <td class="num">{trend}</td>
         <td class="num">${r.bounce_target:,.2f}<span class="sub">+{r.pct_to_bounce:.2f}% to mean</span></td>
         <td class="num">${r.stop:,.2f}<span class="sub">-{STOP_PCT:.0f}%</span></td>
@@ -278,13 +280,13 @@ def render(rows: list[Row], generated: datetime, gauge: dict | None = None) -> s
 <div class="wrap">
   <table>
     <thead><tr>
-      <th>Ticker</th><th>Signal</th><th>Price</th><th>RSI(2)</th>
+      <th>Ticker</th><th>Signal</th><th>Price</th><th>RSI(14)</th>
       <th>vs 200-day</th><th>Bounce target ({EXIT_SMA}d SMA)</th><th>Stop</th><th>Next Earnings</th>
     </tr></thead>
     <tbody>{''.join(trs)}</tbody>
   </table>
 </div>
-<footer>RSI(2) &lt;{RSI_OVERSOLD:.0f} = oversold, &lt;{RSI_DEEP:.0f} = deep, in an uptrend (above 200-day).
+<footer>RSI(14) &lt;{RSI_OVERSOLD:.0f} = oversold, &lt;{RSI_DEEP:.0f} = deep, in an uptrend (above 200-day) — same metric as the gauge.
 Backtested edge is thin and bull-market-biased — not investment advice.</footer>
 </body></html>"""
 
@@ -318,9 +320,9 @@ def main(tickers: list[str] | None = None,
     n = sum(r.signal in ("DEEP OVERSOLD", "OVERSOLD") for r in rows)
     print(f"\n✅ {OUTPUT_HTML} written · {len(rows)} names · {n} actionable oversold setup(s) today.")
     print(f"   Gauge: {gauge['state']} · {gauge['pct_os']:.1f}% oversold · {gauge['pct200']:.0f}% above 200d")
-    for r in sorted(rows, key=lambda x: x.rsi2)[:10]:
+    for r in sorted(rows, key=lambda x: x.rsi14)[:10]:
         er = r.earnings_date or "—"
-        print(f"   {r.ticker:6} RSI2 {r.rsi2:5.1f} | {r.signal:13} | ER {er}")
+        print(f"   {r.ticker:6} RSI14 {r.rsi14:5.1f} | {r.signal:13} | ER {er}")
     return 0
 
 
