@@ -14,15 +14,24 @@ Writes bottleneck_dashboard.html.
 from __future__ import annotations
 
 import html
-from datetime import datetime
+import json
+import os
+import urllib.request
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
 
+import next_nvidia
 from ema_scanner import download
 
 OUTPUT_HTML = "bottleneck_dashboard.html"
 PERIOD = "2y"
+# Fundamental demand layer (revenue growth) is slow/flaky to fetch and barely
+# moves day to day, so it's cached and only refreshed weekly (Mondays), chained
+# through the published Pages copy like the other state files.
+FUND_CACHE = "bottleneck_fund_cache.json"
+FUND_PAGES_URL = "https://travishunt91.github.io/ema-scanner/bottleneck_fund_cache.json"
 
 # Curated bottleneck map: each constraint in the AI/data-center buildout, why it's
 # a bottleneck, and the public "solvers" positioned to relieve it.
@@ -90,6 +99,39 @@ def all_tickers():
     return seen
 
 
+def _load_fund_cache() -> dict:
+    """Last fundamentals: local file first (local runs), else the published copy."""
+    if os.path.exists(FUND_CACHE):
+        try:
+            return json.load(open(FUND_CACHE))
+        except Exception:
+            pass
+    try:
+        req = urllib.request.Request(FUND_PAGES_URL, headers={"User-Agent": "bottleneck"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def fundamentals(tickers, refresh: bool) -> dict:
+    """{ticker: {rev_yoy, accel, fetched}} — refetched weekly, cached otherwise."""
+    cache = _load_fund_cache()
+    if refresh or not cache:
+        print("  fetching fundamentals (weekly revenue refresh) ...")
+        for tk in tickers:
+            m = next_nvidia.metrics(tk)
+            if m and m.get("gNow") == m.get("gNow"):     # not NaN
+                cache[tk] = {"rev_yoy": round(m["gNow"], 1),
+                             "accel": round(m["accel"], 1),
+                             "fetched": date.today().isoformat()}
+        try:
+            json.dump(cache, open(FUND_CACHE, "w"))
+        except Exception:
+            pass
+    return cache
+
+
 def metrics(close: pd.Series, spy_m3: float):
     if len(close) < 130:
         return None
@@ -101,11 +143,16 @@ def metrics(close: pd.Series, spy_m3: float):
     sma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else float("nan")
     sma50 = float(close.rolling(50).mean().iloc[-1])
     trend = (px > sma200) + (px > sma50) if np.isfinite(sma200) else (px > sma50)
-    return dict(price=px, mom3=mom3, mom6=mom6, dist52=dist52,
-                rs3=mom3 - spy_m3, trend=trend / 2)
+    # Fresh-leadership signals: how recently it made a new 3-month high, and how
+    # far it is above its 50-day (extended = late, just-broke-out = fresh).
+    recent = close.tail(63).to_numpy()
+    days_since_high = len(recent) - 1 - int(np.argmax(recent))
+    ext50 = px / sma50 - 1
+    return dict(price=px, mom3=mom3, mom6=mom6, dist52=dist52, rs3=mom3 - spy_m3,
+                trend=trend / 2, days_since_high=days_since_high, ext50=ext50)
 
 
-def build(daily, spy_m3):
+def build(daily, spy_m3, funds):
     out = {}
     for t in all_tickers():
         df = daily.get(t)
@@ -113,21 +160,55 @@ def build(daily, spy_m3):
             continue
         m = metrics(df["Close"].dropna(), spy_m3)
         if m:
+            f = funds.get(t, {})
+            m["rev_yoy"] = f.get("rev_yoy")
+            m["accel"] = f.get("accel")
             out[t] = m
-    # Demand score: within-set percentile ranks, weighted.
     if not out:
         return out
+    # Price-demand score: within-set percentile ranks, weighted.
     frame = pd.DataFrame(out).T
     def rk(col):
         return frame[col].rank(pct=True)
     frame["demand"] = (0.30 * rk("rs3") + 0.25 * rk("mom6") + 0.20 * rk("mom3")
                        + 0.15 * rk("dist52") + 0.10 * frame["trend"]) * 100
-    for t in out:
-        out[t]["demand"] = float(frame.loc[t, "demand"])
+    for t, m in out.items():
+        m["demand"] = float(frame.loc[t, "demand"])
+        ry = m["rev_yoy"]
+        # Fundamentally CONFIRMED = price leadership backed by real revenue growth.
+        m["confirmed"] = m["demand"] >= 60 and ry is not None and ry >= 20
+        # FRESH = a leader that just made a new 3-month high and isn't extended.
+        m["fresh"] = (m["demand"] >= 60 and m["days_since_high"] <= 5
+                      and 0 <= m["ext50"] <= 0.25)
     return out
 
 
+def _rev(m) -> str:
+    ry = m.get("rev_yoy")
+    if ry is None:
+        return '<span class="muted">—</span>'
+    ac = m.get("accel") or 0
+    arrow = "▲" if ac > 2 else "▼" if ac < -2 else "▸"
+    cls = "pos" if ry >= 0 else "neg"
+    return f'<span class="{cls}">{ry:+.0f}%</span> <span class="acc">{arrow}</span>'
+
+
+def _badges(m) -> str:
+    b = ""
+    if m.get("fresh"):
+        b += '<span class="bdg fresh">🆕 FRESH</span>'
+    if m.get("confirmed"):
+        b += '<span class="bdg conf" title="Price leadership confirmed by revenue growth">✓ confirmed</span>'
+    return b
+
+
 def render(data, generated) -> str:
+    # primary category (emoji) per ticker, for the fresh-leaders strip
+    catmap = {}
+    for c in CATEGORIES:
+        for t in c["tickers"]:
+            catmap.setdefault(t, c["emoji"])
+
     # Category heat = average demand score of its members (present in data).
     cats = []
     for c in CATEGORIES:
@@ -142,6 +223,24 @@ def render(data, generated) -> str:
     def dcol(v):
         return "hot" if v >= 66 else "warm" if v >= 40 else "cool"
 
+    # Fresh leaders strip: leaders that just broke out, hottest demand first.
+    fresh = sorted([(t, m) for t, m in data.items() if m.get("fresh")],
+                   key=lambda x: -x[1]["demand"])
+    if fresh:
+        chips = "".join(
+            f'<span class="fl-chip">{catmap.get(t, "")} <b>{t}</b> '
+            f'<span class="fl-d">{m["demand"]:.0f}</span>'
+            + (f' <span class="fl-rev pos">rev {m["rev_yoy"]:+.0f}%</span>' if m.get("rev_yoy") is not None else "")
+            + "</span>" for t, m in fresh)
+        fresh_strip = f"""
+  <div class="fresh-strip">
+    <div class="fl-h">🆕 Fresh Leaders — strong names that <b>just broke out</b> (new 3-mo high, not extended)</div>
+    <div class="fl-chips">{chips}</div>
+  </div>"""
+    else:
+        fresh_strip = """
+  <div class="fresh-strip none">🆕 Fresh Leaders — none right now (no leader made a fresh 3-month high recently).</div>"""
+
     # Heat overview bars
     heat_rows = "".join(f"""
       <div class="heat-row">
@@ -154,11 +253,11 @@ def render(data, generated) -> str:
     for c, members, heat in cats:
         rows = "".join(f"""
         <tr>
-          <td class="tk">{t}<span class="co">{html.escape(NAMES.get(t, ''))}</span></td>
+          <td class="tk">{t}<span class="co">{html.escape(NAMES.get(t, ''))}</span>{_badges(m)}</td>
           <td class="num"><span class="dscore {dcol(m['demand'])}">{m['demand']:.0f}</span></td>
+          <td class="num">{_rev(m)}</td>
           <td class="num">${m['price']:,.2f}</td>
           <td class="num {'pos' if m['rs3']>=0 else 'neg'}">{m['rs3']*100:+.0f}%</td>
-          <td class="num {'pos' if m['mom3']>=0 else 'neg'}">{m['mom3']*100:+.0f}%</td>
           <td class="num {'pos' if m['mom6']>=0 else 'neg'}">{m['mom6']*100:+.0f}%</td>
           <td class="num">{m['dist52']*100:+.0f}%</td>
         </tr>""" for t, m in members)
@@ -168,8 +267,8 @@ def render(data, generated) -> str:
         <span class="cat-heat {dcol(heat)}">heat {heat:.0f}</span></div>
       <div class="cat-why">{c['why']}</div>
       <table class="tbl">
-        <thead><tr><th>Ticker</th><th class="num">Demand</th><th class="num">Price</th>
-          <th class="num">RS vs SPY (3m)</th><th class="num">3m</th><th class="num">6m</th><th class="num">vs 52w hi</th></tr></thead>
+        <thead><tr><th>Ticker</th><th class="num">Demand</th><th class="num" title="Latest annual revenue growth YoY, with acceleration arrow">Rev YoY</th>
+          <th class="num">Price</th><th class="num">RS vs SPY (3m)</th><th class="num">6m</th><th class="num">vs 52w hi</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </div>"""
@@ -210,6 +309,19 @@ def render(data, generated) -> str:
   .dscore.hot {{ background:var(--hot); color:#1a0a06; }}
   .dscore.warm {{ background:rgba(210,153,34,.20); color:var(--warm); }}
   .dscore.cool {{ background:rgba(110,118,129,.18); color:var(--muted); }}
+  .muted {{ color:var(--muted); }} .acc {{ color:var(--muted); font-size:11px; }}
+  .bdg {{ display:inline-block; font-size:10px; font-weight:700; padding:1px 6px; border-radius:4px; margin-left:6px; vertical-align:middle; }}
+  .bdg.fresh {{ background:var(--hot); color:#1a0a06; }}
+  .bdg.conf {{ background:rgba(46,160,67,.20); color:var(--bull); }}
+  .fresh-strip {{ background:linear-gradient(180deg,rgba(247,129,102,.10),var(--panel)); border:1px solid var(--border);
+                 border-left:4px solid var(--hot); border-radius:12px; padding:14px 18px; margin-bottom:24px; }}
+  .fresh-strip.none {{ color:var(--muted); font-size:13px; border-left-color:var(--muted); }}
+  .fl-h {{ font-size:13px; font-weight:700; margin-bottom:10px; }}
+  .fl-chips {{ display:flex; flex-wrap:wrap; gap:8px; }}
+  .fl-chip {{ background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:6px 10px; font-size:13px; }}
+  .fl-chip b {{ font-weight:700; }}
+  .fl-d {{ background:var(--hot); color:#1a0a06; font-weight:800; font-size:11px; padding:1px 6px; border-radius:4px; }}
+  .fl-rev {{ font-size:11px; }}
   .note {{ color:var(--muted); font-size:12px; line-height:1.6; margin-top:8px; }}
 </style></head><body>
 <header>
@@ -221,12 +333,16 @@ def render(data, generated) -> str:
     <div class="ov-h">🔥 Bottleneck Heat — which constraint the market is bidding up now (0–100 demand)</div>
     {heat_rows}
   </div>
+  {fresh_strip}
   {sections}
   <div class="note"><b>How to read this:</b> "Demand" (0–100) ranks each name within the AI-buildout set by
-    relative strength vs SPY (3m), 3- &amp; 6-month momentum, proximity to its 52-week high, and trend — i.e. where
-    capital is rotating. "Heat" is a category's average demand. <b>This is a curated thematic map + a momentum
-    ranking, not a validated forecast</b> — it tells you where demand is showing up, not what will win. Momentum
-    can reverse hard; size accordingly. Not investment advice.</div>
+    relative strength vs SPY (3m), 6-month momentum, proximity to its 52-week high, and trend — i.e. where
+    capital is rotating (the <i>price</i> demand layer). "Rev YoY" is the latest annual revenue growth with an
+    acceleration arrow (▲/▸/▼) — the <i>fundamental</i> demand layer (real sales, refreshed weekly).
+    <b>✓ confirmed</b> = price leadership backed by ≥20% revenue growth. <b>🆕 FRESH</b> = a leader that just made a
+    new 3-month high and isn't extended (early in its move). "Heat" is a category's average demand.
+    <b>This is a curated thematic map + demand ranking, not a validated forecast</b> — it shows where demand is
+    appearing, not what will win. Momentum reverses hard; size accordingly. Not investment advice.</div>
 </div></body></html>"""
 
 
@@ -246,14 +362,19 @@ def main(tickers=None, daily=None) -> int:
     spy_c = spy["Close"].dropna() if spy is not None else None
     spy_m3 = (float(spy_c.iloc[-1]) / float(spy_c.iloc[-64]) - 1) if spy_c is not None and len(spy_c) > 64 else 0.0
 
-    data = build(have, spy_m3)
+    funds = fundamentals(all_tickers(), refresh=next_nvidia._is_refresh_day())
+    data = build(have, spy_m3, funds)
     with open(OUTPUT_HTML, "w") as f:
         f.write(render(data, datetime.now().astimezone()))
 
-    print(f"\n✅ {OUTPUT_HTML} written · {len(data)} names scored")
+    nfresh = sum(m.get("fresh") for m in data.values())
+    nconf = sum(m.get("confirmed") for m in data.values())
+    print(f"\n✅ {OUTPUT_HTML} written · {len(data)} names · {nfresh} fresh · {nconf} confirmed")
     top = sorted(data.items(), key=lambda kv: kv[1]["demand"], reverse=True)[:8]
     for t, m in top:
-        print(f"   {t:6} demand {m['demand']:5.0f} | RS3 {m['rs3']*100:+5.0f}% | 6m {m['mom6']*100:+5.0f}%")
+        ry = f"{m['rev_yoy']:+.0f}%" if m.get("rev_yoy") is not None else "  n/a"
+        tags = ("🆕" if m.get("fresh") else "") + ("✓" if m.get("confirmed") else "")
+        print(f"   {t:6} demand {m['demand']:5.0f} | rev {ry:>6} | 6m {m['mom6']*100:+5.0f}% {tags}")
     return 0
 
 

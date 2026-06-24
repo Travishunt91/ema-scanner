@@ -10,6 +10,7 @@ public/
 # Caches and backtest artifacts
 earnings_cache.json
 momentum_state.json
+bottleneck_fund_cache.json
 backtest_trades.csv
 portfolio_trades.csv
 next_nvidia_screen.csv

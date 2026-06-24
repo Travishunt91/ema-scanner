@@ -66,7 +66,7 @@ jobs:
           mkdir -p public
           cp index.html ema_dashboard.html oversold_dashboard.html momentum_dashboard.html public/
           cp next_nvidia_dashboard.html next_nvidia_screen.csv public/ 2>/dev/null || true
-          cp bottleneck_dashboard.html public/ 2>/dev/null || true
+          cp bottleneck_dashboard.html bottleneck_fund_cache.json public/ 2>/dev/null || true
           # publish the portfolio state so the next run can diff against it
           cp momentum_state.json public/ 2>/dev/null || true
 
