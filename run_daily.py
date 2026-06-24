@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import bottleneck_scanner
 import ema_scanner
 import momentum_scanner
 import next_nvidia
@@ -26,7 +27,7 @@ def write_index(generated: datetime) -> None:
 <title>Daily Market Scan</title>
 <style>
   :root {{ --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#e6edf3;
-          --muted:#8b949e; --bull:#2ea043; --blue:#388bfd; --purple:#a371f7; --teal:#39c5cf; }}
+          --muted:#8b949e; --bull:#2ea043; --blue:#388bfd; --purple:#a371f7; --teal:#39c5cf; --orange:#f78166; }}
   * {{ box-sizing:border-box; }}
   body {{ margin:0; background:var(--bg); color:var(--text); min-height:100vh;
          font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }}
@@ -51,6 +52,8 @@ def write_index(generated: datetime) -> None:
   .mom .tag {{ background:rgba(163,113,247,.18); color:var(--purple); }}
   a.card.fund:hover {{ border-color:var(--teal); }}
   .fund .tag {{ background:rgba(57,197,207,.16); color:var(--teal); }}
+  a.card.theme:hover {{ border-color:var(--orange); }}
+  .theme .tag {{ background:rgba(247,129,102,.16); color:var(--orange); }}
   footer {{ color:var(--muted); font-size:12px; padding:8px 32px 40px; }}
 </style></head><body>
 <header>
@@ -91,8 +94,17 @@ def write_index(generated: datetime) -> None:
       separate a real inflection from one lumpy year. A research watchlist, not a buy list.</div>
     <span class="tag">FUNDAMENTAL · OPEN DASHBOARD →</span>
   </a>
+  <a class="card theme" href="bottleneck_dashboard.html">
+    <div class="emoji">🏗️</div>
+    <div class="ct">AI Buildout Bottlenecks</div>
+    <div class="cd">Thematic. Maps the data-center boom's supply constraints — power, grid,
+      cooling, HBM, optical, fab equipment — to the public companies that relieve each, then
+      ranks them by where demand is rotating now (relative strength + momentum). A research
+      map of the AI supply chain, not a forecast.</div>
+    <span class="tag">THEMATIC · OPEN DASHBOARD →</span>
+  </a>
 </div>
-<footer>Three price edges (trend / dip / momentum) + one fundamental lens. Not investment advice.</footer>
+<footer>Three price edges (trend / dip / momentum) + a fundamental lens + a thematic map. Not investment advice.</footer>
 </body></html>"""
     with open("index.html", "w") as f:
         f.write(html)
@@ -128,6 +140,10 @@ def main() -> int:
     print("\n[D] Fundamentals — next-NVIDIA screen (weekly)")
     print("-" * 60)
     next_nvidia.main(tickers=tickers, weekly=True)
+
+    print("\n[E] Thematic — AI buildout bottlenecks")
+    print("-" * 60)
+    bottleneck_scanner.main(tickers=tickers, daily=daily)
 
     write_index(datetime.now().astimezone())
     print("\n" + "=" * 60)
