@@ -40,7 +40,7 @@ CATEGORIES = [
          why="The #1 constraint. AI data centers need gigawatts of reliable, 24/7 baseload power. "
              "Nuclear, gas and independent power producers that can actually deliver electricity win.",
          tickers=["CEG", "VST", "NRG", "TLN", "GEV", "NEE", "SO", "D", "PEG",
-                  "SMR", "OKLO", "BWXT", "LEU"]),
+                  "SMR", "OKLO", "BWXT", "LEU", "BE"]),
     dict(key="electrical", emoji="🔌", name="Electrical Equipment & Grid",
          why="Transformers, switchgear and power-distribution gear are in multi-year shortage — "
              "you can't energize a data center without them.",
@@ -78,7 +78,7 @@ NAMES = {
     "CEG": "Constellation Energy", "VST": "Vistra", "NRG": "NRG Energy", "TLN": "Talen Energy",
     "GEV": "GE Vernova", "NEE": "NextEra Energy", "SO": "Southern Co", "D": "Dominion Energy",
     "PEG": "Public Service Ent.", "SMR": "NuScale Power", "OKLO": "Oklo", "BWXT": "BWX Technologies",
-    "LEU": "Centrus Energy", "ETN": "Eaton", "VRT": "Vertiv", "POWL": "Powell Industries",
+    "LEU": "Centrus Energy", "BE": "Bloom Energy", "ETN": "Eaton", "VRT": "Vertiv", "POWL": "Powell Industries",
     "HUBB": "Hubbell", "NVT": "nVent Electric", "PWR": "Quanta Services", "MOD": "Modine Mfg",
     "SMCI": "Super Micro", "NVDA": "Nvidia", "AMD": "AMD", "AVGO": "Broadcom", "MRVL": "Marvell",
     "TSM": "TSMC", "ARM": "Arm Holdings", "MU": "Micron", "WDC": "Western Digital", "STX": "Seagate",
@@ -115,16 +115,23 @@ def _load_fund_cache() -> dict:
 
 
 def fundamentals(tickers, refresh: bool) -> dict:
-    """{ticker: {rev_yoy, accel, fetched}} — refetched weekly, cached otherwise."""
+    """{ticker: {rev_yoy, accel, fetched}} — full weekly refresh, plus any newly
+    added tickers fetched immediately so they aren't blank until Monday."""
     cache = _load_fund_cache()
     if refresh or not cache:
+        to_fetch = tickers
         print("  fetching fundamentals (weekly revenue refresh) ...")
-        for tk in tickers:
-            m = next_nvidia.metrics(tk)
-            if m and m.get("gNow") == m.get("gNow"):     # not NaN
-                cache[tk] = {"rev_yoy": round(m["gNow"], 1),
-                             "accel": round(m["accel"], 1),
-                             "fetched": date.today().isoformat()}
+    else:
+        to_fetch = [t for t in tickers if t not in cache]   # new names only
+        if to_fetch:
+            print(f"  fetching fundamentals for {len(to_fetch)} new name(s) ...")
+    for tk in to_fetch:
+        m = next_nvidia.metrics(tk)
+        if m and m.get("gNow") == m.get("gNow"):     # not NaN
+            cache[tk] = {"rev_yoy": round(m["gNow"], 1),
+                         "accel": round(m["accel"], 1),
+                         "fetched": date.today().isoformat()}
+    if to_fetch:
         try:
             json.dump(cache, open(FUND_CACHE, "w"))
         except Exception:
