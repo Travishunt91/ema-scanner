@@ -1,12 +1,12 @@
 name: Daily Market Scan
 
 on:
-  schedule:
-    # GitHub cron is UTC and does NOT follow daylight saving, so we list both
-    # offsets and let the "gate" job below run only the correct one each season.
-    # 3:30pm Central = 30 min after the 4:00pm ET close (data is final by then).
-    - cron: "30 20 * * 1-5"   # 20:30 UTC = 3:30pm Central during DST   (CDT, ~Mar–Nov)
-    - cron: "30 21 * * 1-5"   # 21:30 UTC = 3:30pm Central in standard  (CST, ~Nov–Mar)
+  # Daily cron is DISABLED — run manually from the Actions tab ("Run workflow").
+  # To re-enable 3:30pm-Central daily runs, uncomment the schedule block below
+  # (the DST-aware gate job already matches these two cron strings):
+  # schedule:
+  #   - cron: "30 20 * * 1-5"   # 20:30 UTC = 3:30pm Central during DST (CDT)
+  #   - cron: "30 21 * * 1-5"   # 21:30 UTC = 3:30pm Central in standard (CST)
   workflow_dispatch: {}        # manual "Run workflow" button (always runs)
 
 permissions:
